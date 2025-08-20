@@ -1,4 +1,3 @@
-
 try:
     import pysqlite3
     import sys
@@ -11,6 +10,10 @@ import os
 import sys
 import logging
 from typing import Dict, List, Any, Optional
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from dotenv import load_dotenv
 
 # LangChain imports
 from langchain.chat_models import init_chat_model
@@ -36,6 +39,14 @@ except ImportError:
     print("Error: Required package 'langgraph' not found. Please install it with: pip install langgraph")
     sys.exit(1)
 
+app = FastAPI()
+
+class QueryRequest(BaseModel):
+    query: str
+
+db_instance = None
+agent_executor = None
+llm = None
 
 def setup_database(db_path: str) -> SQLDatabase:
     """
@@ -335,18 +346,14 @@ Based on the Database Response provided, extract the direct and relevant answer 
         return response
 
 
-def run_query(agent_executor: Any, query: str) -> None:
+async def run_query(agent_executor: Any, query: str) -> str:
     """
     Run a natural language query against the SQL agent. 
     """
     try:
         logger.info(f"Processing query: '{query}'")
-        print(f"\nProcessing query: '{query}'")
-        print("-" * 50)
         
-        # For langgraph agents, tools are accessed differently
-        # We don't need to check for tools availability as the agent will handle it
-        
+        final_response = ""
         try:
             events = agent_executor.stream(
                 {"messages": [("user", query)]},
@@ -354,533 +361,206 @@ def run_query(agent_executor: Any, query: str) -> None:
             )
             
             logger.info("Streaming agent response")
-            final_response = ""
+            
             for event in events:
                 if "messages" in event and len(event["messages"]) > 0:
-                    # Display the response
-                    event["messages"][-1].pretty_print()
-                    
-                    # Capture the response for verification
                     if hasattr(event["messages"][-1], "content"):
                         final_response = event["messages"][-1].content
                 else:
                     logger.warning("Received event without messages")
             
-            # Verify and refine the response if we have one
             if final_response:
-                print("\nVerifying and refining response...")
                 refined_response = verify_and_refine_response(query, final_response)
-                print("\n=== Refined Response ===")
-                print(refined_response)
-                print("========================")
+                return refined_response
+            else:
+                return "No response from agent."
+
         except AttributeError as ae:
             error_msg = f"Agent error: {ae}"
             logger.error(error_msg)
-            print(f"\n❌ {error_msg}")
-            print("This might be due to an incompatibility with the agent structure.")
-            print("Trying fallback direct query approach...\n")
             
             try:
-                # Fallback to direct SQL query if possible
                 if hasattr(agent_executor, 'db') and agent_executor.db:
                     db = agent_executor.db
-                    # Try a simple query to list tables
                     tables = db.get_usable_table_names()
-                    print(f"Available tables: {', '.join(tables)}")
                     
-                    # Try to interpret the query as SQL
-                    print("Attempting to interpret your query...")
-                    try:
-                        # For all queries, use the dynamic search approach
-                        # We won't hardcode any specific query patterns
-                        # Perform exhaustive search across all tables
-                        print("\nPerforming exhaustive search across all tables...")
+                    search_terms = []
+                    query_lower = query.lower()
+                    words = query_lower.split()
+                    for word in words:
+                        if len(word) > 3 and word not in ['who', 'what', 'when', 'where', 'show', 'list', 'find', 'get', 'selling', 'buying', 'from', 'with', 'that', 'have', 'this', 'these', 'those']:
+                            search_terms.append(word)
+                            
+                    common_tech_terms = ['phone', 'mobile', 'tablet', 'laptop', 'computer', 'device', 'product']
+                    
+                    for term in common_tech_terms:
+                        if term in query_lower and term not in search_terms:
+                            search_terms.append(term)
+                    
+                    if not search_terms:
+                        all_words = query_lower.split()
+                        common_words = ['who', 'what', 'when', 'where', 'why', 'how', 'is', 'are', 'the', 'a', 'an', 
+                                       'show', 'list', 'find', 'get', 'selling', 'buying', 'from', 'with', 'that', 
+                                       'have', 'this', 'these', 'those', 'and', 'or', 'for', 'to', 'in', 'on', 'at']
                         
-                        # Step 1: Get all tables
-                        tables = db.run("SELECT name FROM sqlite_master WHERE type='table'")
-                        print("\nAvailable tables:")
-                        print(tables)
-                        
-                        # Extract table names from result
-                        table_names = []
-                        for line in str(tables).split('\n'):
-                            if line.strip() and not line.startswith('-') and not '|' in line:
-                                continue
-                            if '|' in line:
-                                table_name = line.split('|')[1].strip()
-                                if table_name and table_name != 'name':
-                                    table_names.append(table_name)
-                                
-                        # Step 2: Extract search terms from query
-                        search_terms = []
-                        query_lower = query.lower()
-                        # Extract potential product names or search terms
-                        words = query_lower.split()
-                        for word in words:
-                            if len(word) > 3 and word not in ['who', 'what', 'when', 'where', 'show', 'list', 'find', 'get', 'selling', 'buying', 'from', 'with', 'that', 'have', 'this', 'these', 'those']:
+                        for word in all_words:
+                            if len(word) > 2 and word not in common_words:
                                 search_terms.append(word)
                                 
-                        # Extract common product brands and categories dynamically
-                        # Instead of hardcoding specific brands, use a more general approach
-                        common_tech_terms = ['phone', 'mobile', 'tablet', 'laptop', 'computer', 'device', 'product']
-                        
-                        # Check if any common tech terms are in the query
-                        for term in common_tech_terms:
-                            if term in query_lower and term not in search_terms:
-                                search_terms.append(term)
-                        
-                        # If no search terms found, use a generic approach
-                        if not search_terms:
-                            # Extract all non-common words as potential search terms
-                            all_words = query_lower.split()
-                            common_words = ['who', 'what', 'when', 'where', 'why', 'how', 'is', 'are', 'the', 'a', 'an', 
-                                           'show', 'list', 'find', 'get', 'selling', 'buying', 'from', 'with', 'that', 
-                                           'have', 'this', 'these', 'those', 'and', 'or', 'for', 'to', 'in', 'on', 'at']
+                    table_scores = {}
+                    for table_name in tables:
+                        score = 0
+                        try:
+                            schema = db.run(f"PRAGMA table_info({table_name})")
+                            schema_str = str(schema)
                             
-                            for word in all_words:
-                                if len(word) > 2 and word not in common_words:
-                                    search_terms.append(word)
-                                
-                        print(f"\nSearch terms extracted from query: {search_terms}")
-                        
-                        # Step 3: Search each table for each term
-                        results_found = False
-                                
-                        # First, analyze all tables to determine which ones might contain relevant information
-                        # We'll score tables based on their column names and sample data
-                        
-                        table_scores = {}
-                        for table_name in table_names:
-                            score = 0
+                            for term in search_terms:
+                                if term.lower() in schema_str.lower():
+                                    score += 5
                             
-                            # Get schema to understand the columns
-                            try:
-                                schema = db.run(f"PRAGMA table_info({table_name})")
-                                schema_str = str(schema)
-                                
-                                # Score based on column names
-                                for term in search_terms:
-                                    if term.lower() in schema_str.lower():
-                                        score += 5  # High score for column names matching search terms
-                                
-                                # Score based on column types (text columns are more likely to contain search terms)
-                                text_columns = []
-                                for line in schema_str.split('\n'):
-                                    if 'TEXT' in line.upper() or 'VARCHAR' in line.upper() or 'CHAR' in line.upper():
-                                        score += 1
-                                        parts = line.split('|')
-                                        if len(parts) > 2:
-                                            column_name = parts[2].strip()
-                                            text_columns.append(column_name)
-                                
-                                # Score based on column names that suggest product or category information
-                                product_related_terms = ['product', 'category', 'item', 'name', 'description', 'title', 'brand']
-                                for line in schema_str.split('\n'):
-                                    for term in product_related_terms:
-                                        if term in line.lower():
-                                            score += 3
-                                
-                                # Get sample data to check content
-                                if text_columns:
-                                    try:
-                                        sample = db.run(f"SELECT * FROM {table_name} LIMIT 3")
-                                        sample_str = str(sample)
-                                        
-                                        # Check if sample data contains any search terms
-                                        for term in search_terms:
-                                            if term.lower() in sample_str.lower():
-                                                score += 10  # High score if sample data contains search terms
-                                    except:
-                                        pass
-                                
-                                # Store the score and text columns
-                                table_scores[table_name] = {
-                                    'score': score,
-                                    'text_columns': text_columns
-                                }
-                            except Exception as e:
-                                print(f"Error analyzing table {table_name}: {e}")
-                                
-                                # Sort tables by score (highest first)
-                                sorted_tables = sorted(table_scores.items(), key=lambda x: x[1]['score'], reverse=True)
-                                
-                                print("\nTables ranked by relevance:")
-                                for table_name, info in sorted_tables:
-                                    print(f"- {table_name} (score: {info['score']})")
-                                
-                                # Search through tables in order of relevance
-                                results_found = False
-                                for table_name, info in sorted_tables:
-                                    if results_found:
-                                        break
-                                        
-                                    print(f"\nChecking {table_name} table (score: {info['score']})...")
-                                    
-                                    # Get schema again for display
-                                    schema = db.run(f"PRAGMA table_info({table_name})")
-                                    print("Schema:")
-                                    print(schema)
-                                    
-                                    # Build dynamic query based on text columns and search terms
-                                    text_columns = info['text_columns']
-                                    if text_columns:
-                                        conditions = []
-                                        for term in search_terms:
-                                            for column in text_columns:
-                                                conditions.append(f"{column} LIKE '%{term}%'")
-                                        
-                                        if conditions:
-                                            query_str = f"""
-                                                SELECT *
-                                                FROM {table_name}
-                                                WHERE {' OR '.join(conditions)}
-                                                LIMIT 10
-                                            """
-                                            
-                                            try:
-                                                result = db.run(query_str)
-                                                print(f"\nResults from {table_name}:")
-                                                print(result)
-                                                if str(result).strip() and not str(result).strip() == '':
-                                                    results_found = True
-                                            except Exception as e:
-                                                print(f"Error querying {table_name}: {e}")
-                                
-                                # If no results found yet, try more advanced techniques
-                                if not results_found:
-                                    print("\nTrying more advanced search techniques...")
-                                    
-                                    # Look for tables with potential relationships
-                                    for table_name in table_names:
-                                        # Skip tables we've already searched thoroughly
-                                        if table_name in [t[0] for t in sorted_tables if t[1]['score'] > 0]:
-                                            continue
-                                            
-                                        print(f"\nAnalyzing potential relationships for {table_name}...")
-                                        
-                                        # Get schema
-                                        schema = db.run(f"PRAGMA table_info({table_name})")
-                                        schema_str = str(schema)
-                                        
-                                        # Look for ID columns that might indicate relationships
-                                        id_columns = []
-                                        for line in schema_str.split('\n'):
-                                            if '|' in line:
-                                                parts = line.split('|')
-                                                if len(parts) > 2:
-                                                    column_name = parts[2].strip()
-                                                    if column_name.lower().endswith('_id') or column_name.lower() == 'id':
-                                                        id_columns.append(column_name)
-                                        
-                                        if id_columns:
-                                            print(f"Found potential ID columns in {table_name}: {', '.join(id_columns)}")
-                                            
-                                            # Try to find relationships with other tables
-                                            for id_col in id_columns:
-                                                for other_table in table_names:
-                                                    if other_table != table_name:
-                                                        other_schema = db.run(f"PRAGMA table_info({other_table})")
-                                                        other_schema_str = str(other_schema)
-                                                        
-                                                        # Check if this ID might be referenced in the other table
-                                                        if id_col.lower() == 'id':
-                                                            # This might be a primary key, look for foreign keys
-                                                            table_prefix = table_name.rstrip('s')  # Simple pluralization handling
-                                                            potential_fk = f"{table_prefix}_id"
-                                                            
-                                                            if potential_fk.lower() in other_schema_str.lower():
-                                                                print(f"Found potential relationship: {table_name}.id -> {other_table}.{potential_fk}")
-                                                                
-                                                                # Try a join query
-                                                                try:
-                                                                    join_query = f"""
-                                                                        SELECT t1.*, t2.*
-                                                                        FROM {table_name} t1
-                                                                        JOIN {other_table} t2 ON t1.id = t2.{potential_fk}
-                                                                        LIMIT 5
-                                                                    """
-                                                                    join_result = db.run(join_query)
-                                                                    print(f"\nJoin results between {table_name} and {other_table}:")
-                                                                    print(join_result)
-                                                                    if str(join_result).strip() and not str(join_result).strip() == '':
-                                                                        results_found = True
-                                                                except Exception as e:
-                                                                    print(f"Error executing join query: {e}")
-                                                        elif id_col.lower().endswith('_id'):
-                                                            # This might be a foreign key, look for the referenced table
-                                                            referenced_table = id_col.lower().replace('_id', '')
-                                                            if referenced_table == other_table.lower() or f"{referenced_table}s" == other_table.lower():
-                                                                print(f"Found potential relationship: {table_name}.{id_col} -> {other_table}.id")
-                                                                
-                                                                # Try a join query
-                                                                try:
-                                                                    join_query = f"""
-                                                                        SELECT t1.*, t2.*
-                                                                        FROM {table_name} t1
-                                                                        JOIN {other_table} t2 ON t1.{id_col} = t2.id
-                                                                        LIMIT 5
-                                                                    """
-                                                                    join_result = db.run(join_query)
-                                                                    print(f"\nJoin results between {table_name} and {other_table}:")
-                                                                    print(join_result)
-                                                                    if str(join_result).strip() and not str(join_result).strip() == '':
-                                                                        results_found = True
-                                                                except Exception as e:
-                                                                    print(f"Error executing join query: {e}")
-                                
-                                # If no results found in main tables, check all remaining tables
-                                if not results_found:
-                                    print("\nChecking all other tables...")
-                                    for table in table_names:
-                                        if table not in ['user_categories', 'product_categories', 'messages']:
-                                            print(f"\nChecking {table} table...")
-                                            # Get schema
-                                            schema = db.run(f"PRAGMA table_info({table})")
-                                            
-                                            # Look for text columns to search in
-                                            text_columns = []
-                                            id_columns = []
-                                            for line in str(schema).split('\n'):
-                                                if '|' in line:
-                                                    parts = line.split('|')
-                                                    if len(parts) > 2:
-                                                        column_name = parts[2].strip()
-                                                        column_type = parts[3].strip() if len(parts) > 3 else ""
-                                                        
-                                                        # Identify ID columns for potential joins
-                                                        if column_name.lower().endswith('_id') or column_name.lower() == 'id':
-                                                            id_columns.append(column_name)
-                                                        
-                                                        # Identify text columns for searching
-                                                        if 'TEXT' in column_type.upper() or 'VARCHAR' in column_type.upper() or 'CHAR' in column_type.upper():
-                                                            text_columns.append(column_name)
-                                            
-                                            # Try simple search first
-                                            if text_columns:
-                                                # Sample data
-                                                sample = db.run(f"SELECT * FROM {table} LIMIT 3")
-                                                print(f"Sample data from {table}:")
-                                                print(sample)
-                                                
-                                                # Build dynamic query for each text column
-                                                for column in text_columns:
-                                                    conditions = []
-                                                    for term in search_terms:
-                                                        conditions.append(f"{column} LIKE '%{term}%'")
-                                                    
-                                                    if conditions:
-                                                        query_str = f"""
-                                                            SELECT *
-                                                            FROM {table}
-                                                            WHERE {' OR '.join(conditions)}
-                                                            LIMIT 5
-                                                        """
-                                                        
-                                                        try:
-                                                            result = db.run(query_str)
-                                                            print(f"\nResults from {table} (column {column}):")
-                                                            print(result)
-                                                            if str(result).strip() and not str(result).strip() == '':
-                                                                results_found = True
-                                                        except Exception as e:
-                                                            print(f"Error querying {table}.{column}: {e}")
-                                            
-                                            # Try to find potential joins with other tables
-                                            if id_columns and not results_found:
-                                                print(f"\nLooking for potential joins with {table}...")
-                                                
-                                                for id_col in id_columns:
-                                                    # Find potential foreign key relationships
-                                                    related_table = None
-                                                    if id_col.lower() == 'id':
-                                                        # This might be a primary key, look for tables referencing it
-                                                        table_prefix = table.rstrip('s')  # Simple pluralization handling
-                                                        for other_table in table_names:
-                                                            if other_table != table:
-                                                                other_schema = db.run(f"PRAGMA table_info({other_table})")
-                                                                for line in str(other_schema).split('\n'):
-                                                                    if f"{table_prefix}_id" in line.lower() or f"{table}_id" in line.lower():
-                                                                        related_table = other_table
-                                                                        related_col = f"{table_prefix}_id" if f"{table_prefix}_id" in line.lower() else f"{table}_id"
-                                                                        
-                                                                        print(f"Found potential relationship: {table}.id -> {other_table}.{related_col}")
-                                                                        
-                                                                        # Try a join query
-                                                                        try:
-                                                                            join_query = f"""
-                                                                                SELECT t1.*, t2.*
-                                                                                FROM {table} t1
-                                                                                JOIN {other_table} t2 ON t1.id = t2.{related_col}
-                                                                                LIMIT 5
-                                                                            """
-                                                                            join_result = db.run(join_query)
-                                                                            print(f"\nJoin results between {table} and {other_table}:")
-                                                                            print(join_result)
-                                                                            if str(join_result).strip() and not str(join_result).strip() == '':
-                                                                                results_found = True
-                                                                        except Exception as join_e:
-                                                                            print(f"Error executing join query: {join_e}")
-                                                    else:
-                                                        # This might be a foreign key, look for referenced table
-                                                        potential_table = id_col.replace('_id', '').lower()
-                                                        for other_table in table_names:
-                                                            if other_table.lower() == potential_table or other_table.lower() == f"{potential_table}s":  # Simple pluralization
-                                                                print(f"Found potential relationship: {table}.{id_col} -> {other_table}.id")
-                                                                
-                                                                # Try a join query
-                                                                try:
-                                                                    join_query = f"""
-                                                                        SELECT t1.*, t2.*
-                                                                        FROM {table} t1
-                                                                        JOIN {other_table} t2 ON t1.{id_col} = t2.id
-                                                                        LIMIT 5
-                                                                    """
-                                                                    join_result = db.run(join_query)
-                                                                    print(f"\nJoin results between {table} and {other_table}:")
-                                                                    print(join_result)
-                                                                    if str(join_result).strip() and not str(join_result).strip() == '':
-                                                                        results_found = True
-                                                                except Exception as join_e:
-                                                                    print(f"Error executing join query: {join_e}")
-                                
-                                if not results_found:
-                                    fallback_response = "No results found after exhaustive search across all tables. Try refining your search terms or check if the data exists in the database."
-                                    print(f"\n{fallback_response}")
-                                    
-                                    # Verify and refine the fallback response
-                                    print("\nVerifying and refining response...")
-                                    refined_response = verify_and_refine_response(query, fallback_response)
-                                    print("\n=== Refined Response ===")
-                                    print(refined_response)
-                                    print("========================")
-                                
-                            except Exception as e:
-                                print(f"Error during exhaustive search: {e}")
-                                print("Trying simpler approach...")
-                                
-                                # Fallback to simpler approach
+                            text_columns = []
+                            for line in schema_str.split('\n'):
+                                if 'TEXT' in line.upper() or 'VARCHAR' in line.upper() or 'CHAR' in line.upper():
+                                    score += 1
+                                    parts = line.split('|')
+                                    if len(parts) > 2:
+                                        column_name = parts[2].strip()
+                                        text_columns.append(column_name)
+                            
+                            product_related_terms = ['product', 'category', 'item', 'name', 'description', 'title', 'brand']
+                            for line in schema_str.split('\n'):
+                                for term in product_related_terms:
+                                    if term in line.lower():
+                                        score += 3
+                            
+                            if text_columns:
                                 try:
-                                    # Check if user_categories exists
-                                    tables = db.run("SELECT name FROM sqlite_master WHERE type='table' AND name='user_categories'")
-                                    if 'user_categories' in str(tables):
-                                        result = db.run("SELECT * FROM user_categories LIMIT 5")
-                                        print("\nSample data from user_categories:")
-                                        print(result)
-                                except Exception as inner_e:
-                                    print(f"Fallback search failed: {inner_e}")
-                    except Exception as sql_e:
-                        print(f"SQL error: {sql_e}")
+                                    sample = db.run(f"SELECT * FROM {table_name} LIMIT 3")
+                                    sample_str = str(sample)
+                                    
+                                    for term in search_terms:
+                                        if term.lower() in sample_str.lower():
+                                            score += 10
+                                except:
+                                    pass
+                            
+                            table_scores[table_name] = {
+                                'score': score,
+                                'text_columns': text_columns
+                            }
+                        except Exception as e:
+                            logger.error(f"Error analyzing table {table_name}: {e}")
+                            
+                    sorted_tables = sorted(table_scores.items(), key=lambda x: x[1]['score'], reverse=True)
+                    
+                    results_found = False
+                    for table_name, info in sorted_tables:
+                        if results_found:
+                            break
+                            
+                        text_columns = info['text_columns']
+                        if text_columns:
+                            conditions = []
+                            for term in search_terms:
+                                for column in text_columns:
+                                    conditions.append(f"{column} LIKE '%{term}%'")
+                            
+                            if conditions:
+                                query_str = f"""
+                                    SELECT *
+                                    FROM {table_name}
+                                    WHERE {' OR '.join(conditions)}
+                                    LIMIT 10
+                                """
+                                
+                                try:
+                                    result = db.run(query_str)
+                                    if str(result).strip() and not str(result).strip() == '':
+                                        results_found = True
+                                        return str(result)
+                                except Exception as e:
+                                    logger.error(f"Error querying {table_name}: {e}")
+                    
+                    if not results_found:
+                        return "No results found after exhaustive search."
                 else:
-                    print("No database connection available for fallback query.")
+                    return "No database connection available for fallback query."
             except Exception as fallback_e:
-                print(f"Fallback approach failed: {fallback_e}")
+                return f"Fallback approach failed: {fallback_e}"
         
         logger.info("Query processing completed")
-        print("-" * 50)
+        return "An unexpected error occurred."
     except Exception as e:
         error_msg = f"Error processing query: {e}"
         logger.error(error_msg)
-        print(f"\n❌ {error_msg}")
-
-
-def get_user_query() -> str:
-    """
-    Get query from command line arguments or use default.
-    
-    """
-    default_query = "who selling iphone?"
-    
-    if len(sys.argv) > 1:
-        user_query = " ".join(sys.argv[1:])
-        logger.info(f"Using query from command line: '{user_query}'")
-        return user_query
-    
-    logger.info(f"No query provided, using default: '{default_query}'")
-    return default_query
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 def find_database_file(default_path: str) -> str:
     """
     Find a suitable database file.
-
     """
-    # Check if default path exists
     if os.path.exists(default_path):
         logger.info(f"Found database at default path: {default_path}")
         return default_path
     
-    # Look for database files in current directory
     logger.warning(f"Database file '{default_path}' not found")
-    print(f"Warning: Database file '{default_path}' not found")
-    
     current_dir = os.getcwd()
-    print(f"Looking for database files in: {current_dir}")
     
-    available_files = [f for f in os.listdir() if f.endswith('.db')]
+    available_files = [f for f in os.listdir(current_dir) if f.endswith('.db')]
     
     if available_files:
         selected_db = available_files[0]
         logger.info(f"Found alternative database files: {', '.join(available_files)}")
-        print(f"Found database files: {', '.join(available_files)}")
-        print(f"Using '{selected_db}'")
-        return selected_db
+        return os.path.join(current_dir, selected_db)
     
-    # Check if database exists in the workspace directory
     logger.error("No database files found in the current directory")
     raise FileNotFoundError("No database files found in the current directory")
 
 
-def main():
-    """Main function to set up and run the SQL agent."""
+@app.on_event("startup")
+async def startup_event():
+    global db_instance, agent_executor, llm
     try:
-        logger.info("Starting SQL Database Agent")
-        print("SQL Database Agent")
-        print("=" * 50)
+        # Load .env file from the same directory as the script
+        dotenv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+        load_dotenv(dotenv_path=dotenv_path)
+        logger.info("Starting up and initializing components...")
         
-        # Configuration
         default_db_path = "messages.db"
         api_key = os.environ.get("GOOGLE_API_KEY")
         
-        # Set API key if not already set in environment
         if not api_key:
-            api_key_value = "key"
-            os.environ["GOOGLE_API_KEY"] = api_key_value
-            logger.warning("Using hardcoded API key")
-            print("⚠️ Warning: Using hardcoded API key. Consider setting GOOGLE_API_KEY environment variable.")
+            logger.error("GOOGLE_API_KEY not found in .env file")
+            raise ValueError("GOOGLE_API_KEY not found in .env file")
         
-        # Find suitable database file
         db_path = find_database_file(default_db_path)
         
-        # Setup components
-        print("\nInitializing components...")
-        db = setup_database(db_path)
+        db_instance = setup_database(db_path)
         llm = setup_llm()
-        agent_executor = create_sql_agent(db, llm)
-        print("✅ All components initialized successfully")
+        agent_executor = create_sql_agent(db_instance, llm)
         
-        # Get query from command line arguments or use default
-        query = get_user_query()
-        run_query(agent_executor, query)
-        
-        logger.info("SQL Database Agent completed successfully")
+        logger.info("All components initialized successfully")
         
     except FileNotFoundError as e:
         logger.error(f"File error: {e}")
-        print(f"\n❌ Error: {e}")
         sys.exit(1)
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
-        print(f"\n❌ Configuration error: {e}")
         sys.exit(1)
-    except KeyboardInterrupt:
-        logger.info("Process interrupted by user")
-        print("\n\nProcess interrupted by user")
-        sys.exit(0)
     except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        print(f"\n❌ An unexpected error occurred: {e}")
+        logger.error(f"Unexpected error during startup: {e}", exc_info=True)
         sys.exit(1)
 
+
+@app.post("/query/")
+async def query_endpoint(request: QueryRequest):
+    if not agent_executor:
+        raise HTTPException(status_code=503, detail="Agent not initialized")
+    
+    response = await run_query(agent_executor, request.query)
+    return {"response": response}
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
