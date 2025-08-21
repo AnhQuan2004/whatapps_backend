@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langchain
+langchain-google-genai
+sqlalchemy
+pysqlite3-binary
+langgraph
+python-dotenv

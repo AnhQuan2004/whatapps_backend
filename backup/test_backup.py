@@ -34,8 +34,6 @@ import os
 import sys
 import logging
 from typing import Dict, List, Any, Optional
-from dotenv import load_dotenv
-load_dotenv()
 
 # LangChain imports
 from langchain.chat_models import init_chat_model
